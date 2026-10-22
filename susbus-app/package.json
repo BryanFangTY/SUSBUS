@@ -1,0 +1,16 @@
+{
+  "devDependencies": {
+    "cordova-android": "^15.1.0",
+    "cordova-plugin-geolocation": "^5.0.0"
+  },
+  "cordova": {
+    "platforms": [
+      "android"
+    ],
+    "plugins": {
+      "cordova-plugin-geolocation": {
+        "GPS_REQUIRED": "true"
+      }
+    }
+  }
+}

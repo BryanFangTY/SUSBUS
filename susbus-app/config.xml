@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='utf-8'?>
+<widget id="cn.sustech.susbus" version="1.0.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+    <name>SUSBUS</name>
+    <description>SUSBUS 校园巴士实时系统 —— 所有车辆实时位置地图</description>
+    <author href="https://sustech.online">SUSBUS</author>
+    <content src="index.html" />
+    <access origin="*" />
+    <allow-navigation href="https://*/*" />
+    <allow-navigation href="http://*/*" />
+    <allow-intent href="https://*/*" />
+    <preference name="DisallowOverscroll" value="true" />
+    <preference name="BackgroundColor" value="#202127" />
+    <preference name="SplashMaintainAspectRatio" value="true" />
+    <preference name="android-minSdkVersion" value="24" />
+    <preference name="android-compileSdkVersion" value="36" />
+    <preference name="android-targetSdkVersion" value="36" />
+    <platform name="android">
+        <allow-navigation href="https://*/*" />
+    </platform>
+</widget>

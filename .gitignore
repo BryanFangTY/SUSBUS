@@ -1,0 +1,16 @@
+# Cordova 构建产物与依赖（可由 package.json 重建）
+susbus-app/node_modules/
+susbus-app/platforms/
+susbus-app/plugins/
+
+# 签名密钥与密码 —— 严禁提交到仓库
+susbus-app/susbus-release.keystore
+susbus-app/build.json
+
+# APK 通过 GitHub Release 分发，不入库
+*.apk
+
+# vendor-pkg 中 tgz 的解压中间产物
+vendor-pkg/ml6/
+vendor-pkg/pm4/
+vendor-pkg/package/

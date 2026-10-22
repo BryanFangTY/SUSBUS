@@ -102,3 +102,7 @@ npx cordova build android --release --buildConfig build.json
 ## 数据来源
 
 车辆与线路数据来自 SUSTech 校园巴士实时接口（`buseta.sustcra.com`），数据源、坐标体系、线路配色与渲染逻辑对齐参考站点 [sustech.online/transport/bustimer.html](https://sustech.online/transport/bustimer.html)。
+
+---
+
+本项目由 TRAE + Mimo-V2.6-Pro 辅助生成。

@@ -8,26 +8,28 @@ SUSBUS 是一款 Android 应用（APK），在深色模式地图上实时展示�
 
 - **车辆实时位置**：地图上实时渲染巴士 / 电瓶车位置，10 秒自动刷新，也可用右下角刷新按钮（带进度环）手动刷新
 - **行驶方向箭头**：根据接口 `course` 字段旋转车辆图标，无方向数据时按最近路段局部推算
-- **线路与站点**：绘制各条运营线路（独立配色）与站点图层，点击站点可查看站点信息
-- **车辆详情弹窗**：点击车辆查看车牌、车型、速度、更新时间等实时信息
+- **线路与站点**：绘制线路与站点图层，统一使用中性灰色（线路 `#aaa`、站点 `#ccc`），点击站点弹出站名
+- **车辆详情弹窗**：点击车辆查看车辆名称、服务类型、车型、运行位置、更新时间
 - **避免重叠**：可开启图标避让，防止同位置车辆互相遮挡
 - **全部车辆开关**：可选择显示包括暂停服务在内的所有车辆
 - **深色模式**：完整还原参考站点的深色配色（地图底色 `#202127` 起）
+- **弱网稳健性**：单次请求 8 秒超时，车辆轮询带并发锁与请求序号（丢弃乱序过期响应），弱网挂起时不会叠加请求
+- **线路降级重试**：线路 / 站点数据加载失败时在地图上显示提示，并按 3 个刷新周期（30 秒）降频重试，不阻塞车辆轮询
 - **稳健启动**：启动加载动画由 `try/finally` 兜底，任何初始化异常都不会卡在启动页；地图库缺失时自动降级，不阻塞应用
 
 ## 无障碍支持
 
 - 地图区域、刷新按钮等控件均带 `aria-label`，刷新按钮支持键盘操作
 - 加载状态 `role="status"` + `aria-live="polite"`，错误提示 `role="alert"` 实时播报
-- 更新时间戳使用 `aria-live` 播报数据新鲜度
+- 数据更新播报与秒级时间戳解耦：时间戳不再进入 `aria-live`，改由屏幕阅读器专用状态区（`.sr-only`）仅在轮询成功后播报车辆数量，避免读屏器被每秒变化的时间刷屏
 
 ## 技术栈
 
 | 组件 | 说明 |
 | --- | --- |
-| Cordova Android 15.1 | 混合应用外壳，包名 `cn.sustech.susbus` |
-| MapLibre GL JS 3.6.2 | 地图渲染引擎（本地 `www/vendor/` 引用，**无外部 CDN**） |
-| pmtiles 3.2.1 | 矢量底图协议（本地引用） |
+| Cordova Android 15.1.0 | 混合应用外壳，包名 `cn.sustech.susbus` |
+| MapLibre GL JS 6.8.0 | 地图渲染引擎（本地 `www/vendor/` 引用，**无外部 CDN**） |
+| pmtiles 4.5.0 | 矢量底图协议（本地引用） |
 | 原生 ES Module JS | 无前端框架依赖，入口 `www/js/app.js` |
 
 所有第三方库均下载到本地引用，避免 Cordova WebView 网络环境导致的加载失败。
@@ -67,29 +69,13 @@ npx cordova platform add android    # 首次需要
 npx cordova run android
 ```
 
-### 构建发布版 APK
-
-发布签名需要本地自备 `susbus-release.keystore` 与 `build.json`（仓库中不包含这两份文件），然后：
+### 构建 APK
 
 ```powershell
-npx cordova build android --release --buildConfig build.json
-# 产物：platforms/android/app/build/outputs/apk/release/app-release.apk
-```
-
-`build.json` 模板（密码请换成自己的，勿提交仓库）：
-
-```json
-{
-  "android": {
-    "release": {
-      "keystore": "susbus-release.keystore",
-      "storePassword": "<your-store-password>",
-      "alias": "<your-key-alias>",
-      "password": "<your-key-password>",
-      "keystoreType": ""
-    }
-  }
-}
+cd susbus-app
+npm install
+npx cordova build android
+# 产物：platforms/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 构建注意事项：国内网络环境下 `services.gradle.org` 可能不可达，需预先缓存 Gradle 发行包到 `~/.gradle/wrapper/dists/`；`config.xml` 的 `BackgroundColor` 必须使用 `#RRGGBB` 格式。

@@ -11,6 +11,8 @@ const API_BASE = 'https://buseta.sustcra.com';
 const DARK_STYLE = 'https://bus.sustcra.com/static/protomaps/pmtiles-style/pmtiles-dark.json';
 const CAMPUS_CENTER = [113.99373, 22.60308];
 const REFRESH_SECONDS = 10;
+const REQUEST_TIMEOUT_MS = 8000; // 请求超时：必须小于轮询周期，保证一轮内 settle
+const ROUTES_RETRY_SECONDS = REFRESH_SECONDS * 3; // 线路/站点加载失败后的降频重试间隔（3 个刷新周期，避免请求风暴）
 const CACHE_BUST = Date.now();
 
 /* ======================= 状态 ======================= */
@@ -20,6 +22,7 @@ const state = {
   vehicles: [],
   loading: true,
   error: false,
+  routesError: false,
   showAllVehicles: false,
   avoidOverlap: true,
   selectedVehicle: null,
@@ -33,6 +36,19 @@ let vehicleMarkers = new Map();
 let vehicleDetailMarker = null;
 let activePopup = null;
 let remaining = REFRESH_SECONDS;
+// 车辆轮询：并发锁 + 请求序号（丢弃乱序过期响应）
+let vehiclesInFlight = false;
+let vehiclesPendingReload = false;
+let vehiclesRequestSeq = 0;
+// 线路/站点：并发锁 + 重试冷却
+let routesInFlight = false;
+let routesRetryCooldown = 0;
+// 首次线路数据就绪后自动适配视野一次；用户手动平移后不再拉回
+let fittedToStops = false;
+let userMovedMap = false;
+// 地图消息按来源组合渲染，避免线路错误覆盖/擦除地图错误
+let mapErrorMessage = '';
+let routesErrorMessage = '';
 
 /* ======================= DOM ======================= */
 const el = {
@@ -157,17 +173,28 @@ function formatUpdated(value) {
 async function publicApi(path) {
   const separator = path.includes('?') ? '&' : '?';
   const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}${separator}_=${Date.now()}`;
-  const response = await fetch(url, {
-    cache: 'no-store',
-    credentials: 'omit',
-    headers: { Accept: 'application/json' },
-  });
-  if (!response.ok) {
-    let message = response.statusText;
-    try { message = (await response.json()).error || message; } catch { /* 非 JSON 响应 */ }
-    throw new Error(message || `Request failed (${response.status})`);
+  // 手动超时：Android 7 旧 WebView 不支持 AbortSignal.timeout()
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      cache: 'no-store',
+      credentials: 'omit',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      let message = response.statusText;
+      try { message = (await response.json()).error || message; } catch { /* 非 JSON 响应 */ }
+      throw new Error(message || `Request failed (${response.status})`);
+    }
+    return await response.json();
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000}s）`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return response.json();
 }
 
 const busApi = {
@@ -223,11 +250,12 @@ function stopFeatures() {
 /* ======================= 地图渲染 ======================= */
 function fitToStops() {
   const coordinates = stopFeatures().map((feature) => feature.geometry.coordinates);
-  if (!coordinates.length) return;
+  if (!coordinates.length) return false;
   const bounds = coordinates.reduce(
     (current, coordinate) => current.extend(coordinate),
     new maplibregl.LngLatBounds(coordinates[0], coordinates[0]));
   map.fitBounds(bounds, { padding: 48, maxZoom: 14.5, duration: 0 });
+  return true;
 }
 
 function addLayers() {
@@ -468,8 +496,16 @@ function showMapMessage(message) {
   el.mapMessage.hidden = false;
 }
 
-function hideMapMessage() {
-  el.mapMessage.hidden = true;
+// 组合渲染地图/线路两类消息：任一来源的错误都不会覆盖或擦除另一来源的提示
+function renderMapMessage() {
+  const message = [mapErrorMessage, routesErrorMessage].filter(Boolean).join('；');
+  if (message) {
+    showMapMessage(message);
+  } else if (mapLoaded) {
+    el.mapMessage.hidden = true;
+  } else {
+    showMapMessage('正在加载地图…');
+  }
 }
 
 /* ======================= 初始化 ======================= */
@@ -510,15 +546,19 @@ async function initMap() {
 
   map.on('style.load', () => { addLayers(); refresh(); });
   map.on('movestart', settleVehicleMarkers);
+  map.on('movestart', () => { userMovedMap = true; });
   map.on('load', () => {
     mapLoaded = true;
     addLayers();
     fitToStops();
     refresh();
-    hideMapMessage();
+    renderMapMessage();
   });
   map.on('error', (event) => {
-    if (!mapLoaded && event.error) showMapMessage(`地图不可用：${event.error.message}`);
+    if (!mapLoaded && event.error) {
+      mapErrorMessage = `地图不可用：${event.error.message}`;
+      renderMapMessage();
+    }
   });
 }
 
@@ -559,30 +599,76 @@ function updateRefreshRing() {
 }
 
 async function loadVehicles() {
+  // 并发锁：定时器每 10s 无条件触发，弱网挂起时不得叠加请求；
+  // 锁期间的显式请求（开关切换/刷新按钮）记为 pending，完成后补一轮
+  if (vehiclesInFlight) { vehiclesPendingReload = true; return; }
+  vehiclesInFlight = true;
+  const requestSeq = ++vehiclesRequestSeq;
   try {
     const vehicles = await busApi.vehicles(state.showAllVehicles);
+    if (requestSeq !== vehiclesRequestSeq) return; // 丢弃乱序返回的过期响应
     state.vehicles = Array.isArray(vehicles) ? vehicles : [];
     state.loading = false;
     state.error = false;
     refreshVehicleMarkers();
     updateLastUpdated();
   } catch (error) {
+    if (requestSeq !== vehiclesRequestSeq) return;
     state.loading = false;
     state.error = true;
   } finally {
+    vehiclesInFlight = false;
     renderState();
     remaining = REFRESH_SECONDS;
     updateRefreshRing();
+    if (vehiclesPendingReload) {
+      vehiclesPendingReload = false;
+      loadVehicles();
+    }
   }
 }
 
 async function loadRoutesAndStops() {
-  const [routes, stops] = await Promise.all([busApi.routes(), busApi.stops()]);
-  state.routes = Array.isArray(routes) ? routes : [];
-  state.stops = Array.isArray(stops) ? stops : [];
-  // 线路数据就绪后主动刷新车辆方向箭头
-  refresh();
-  refreshVehicleMarkers();
+  if (routesInFlight) return;
+  routesInFlight = true;
+  try {
+    const [routes, stops] = await Promise.all([busApi.routes(), busApi.stops()]);
+    state.routes = Array.isArray(routes) ? routes : [];
+    state.stops = Array.isArray(stops) ? stops : [];
+    state.routesError = false;
+    routesRetryCooldown = 0;
+    routesErrorMessage = '';
+    renderMapMessage();
+    // 线路数据就绪后主动刷新车辆方向箭头
+    refresh();
+    if (!fittedToStops && !userMovedMap) fittedToStops = fitToStops();
+    refreshVehicleMarkers();
+  } catch (error) {
+    // 线路/站点失败不致命：置错误标志、可见提示，由心跳降频重试
+    state.routesError = true;
+    routesRetryCooldown = ROUTES_RETRY_SECONDS;
+    routesErrorMessage = '线路/站点数据暂时不可用，将自动重试…';
+    renderMapMessage();
+    console.warn('线路/站点数据加载失败：', error);
+  } finally {
+    routesInFlight = false;
+  }
+}
+
+// 秒级心跳：更新于 Xs前 + 刷新倒计时环 + 车辆轮询 + 线路降频重试
+function tick() {
+  updateLastUpdated();
+  if (state.routesError && routesRetryCooldown > 0) routesRetryCooldown -= 1;
+  remaining -= 1;
+  if (remaining <= 0) {
+    remaining = REFRESH_SECONDS;
+    loadVehicles();
+    if (state.routesError && routesRetryCooldown === 0) {
+      routesRetryCooldown = ROUTES_RETRY_SECONDS;
+      loadRoutesAndStops();
+    }
+  }
+  updateRefreshRing();
 }
 
 /* ======================= 启动 ======================= */
@@ -600,7 +686,14 @@ async function init() {
     state.avoidOverlap = el.toggleAvoidOverlap.checked;
     refreshVehicleMarkers();
   });
-  el.refreshBtn.addEventListener('click', () => loadVehicles());
+  el.refreshBtn.addEventListener('click', () => {
+    loadVehicles();
+    // 刷新按钮同时补回线路/站点数据，不必等自动重试
+    if (state.routesError) {
+      routesRetryCooldown = ROUTES_RETRY_SECONDS;
+      loadRoutesAndStops();
+    }
+  });
 
   renderState();
   updateRefreshRing();
@@ -609,23 +702,16 @@ async function init() {
     await initMap();
   } catch (error) {
     // 地图不可用时自动降级：界面其余部分继续工作
-    showMapMessage(`地图不可用：${error.message || error}`);
+    mapErrorMessage = `地图不可用：${error.message || error}`;
+    renderMapMessage();
     console.error(error);
   }
 
+  // 心跳先于线路/站点加载建立：其失败不得阻止车辆轮询启动
+  setInterval(tick, 1000);
+
   await loadRoutesAndStops();
   await loadVehicles();
-
-  // 秒级时钟：更新于 Xs前 + 刷新倒计时环
-  setInterval(() => {
-    updateLastUpdated();
-    remaining -= 1;
-    if (remaining <= 0) {
-      remaining = REFRESH_SECONDS;
-      loadVehicles();
-    }
-    updateRefreshRing();
-  }, 1000);
 }
 
 async function boot() {

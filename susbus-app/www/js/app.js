@@ -57,6 +57,7 @@ const el = {
   mapMessage: document.getElementById('mapMessage'),
   vehiclesState: document.getElementById('vehiclesState'),
   lastUpdated: document.getElementById('lastUpdated'),
+  freshnessAnnounce: document.getElementById('freshnessAnnounce'),
   toggleAllVehicles: document.getElementById('toggleAllVehicles'),
   toggleAvoidOverlap: document.getElementById('toggleAvoidOverlap'),
   refreshBtn: document.getElementById('refreshBtn'),
@@ -567,12 +568,23 @@ function updateLastUpdated() {
   const times = state.vehicles
     .map((vehicle) => vehicle.source_updated_at || vehicle.received_at)
     .filter(Boolean).map(Date.parse).filter(Number.isFinite);
-  if (!times.length) { el.lastUpdated.textContent = ''; return; }
+  if (!times.length) {
+    el.lastUpdated.textContent = '';
+    el.lastUpdated.removeAttribute('datetime');
+    return;
+  }
   const latest = Math.max(...times);
+  el.lastUpdated.setAttribute('datetime', new Date(latest).toISOString());
   const age = Math.max(0, Math.floor((Date.now() - latest) / 1000));
   el.lastUpdated.textContent = age <= 120
     ? `更新于 ${age}s前`
     : `更新于 ${new Date(latest).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' })}`;
+}
+
+// 只在轮询成功后播报一次，避免每秒变化的时间戳刷屏读屏器
+function announceFreshness() {
+  if (!el.freshnessAnnounce) return;
+  el.freshnessAnnounce.textContent = `车辆数据已更新，共 ${state.vehicles.length} 辆`;
 }
 
 function renderState() {
@@ -612,6 +624,7 @@ async function loadVehicles() {
     state.error = false;
     refreshVehicleMarkers();
     updateLastUpdated();
+    announceFreshness();
   } catch (error) {
     if (requestSeq !== vehiclesRequestSeq) return;
     state.loading = false;

@@ -211,6 +211,21 @@ const routeFor = (id) => state.routes.find((route) => route.id === id);
 // 该视图为 neutral 模式：线路灰色、站点浅灰（与官方"所有车辆实时位置"一致）
 const NEUTRAL_ROUTE_COLOR = '#aaa';
 const NEUTRAL_STOP_COLOR = '#ccc';
+// 各线路主题色（1路/K1路/2路/K2路）：按线路 ID 与名称归一化匹配，未命中时退回接口配色
+const ROUTE_THEME_COLORS = {
+  line1: '#00A529', '1': '#00A529',
+  k1: '#006C41',
+  line2: '#E96982', '2': '#E96982',
+  k2: '#CB4543',
+};
+function routeThemeColor(route, fallback) {
+  const normalize = (value) => String(value || '').toLowerCase().replace(/\s+/g, '').replace(/路$/, '');
+  for (const value of [route?.id, route?.name_zh, route?.display_name_zh, route?.name_en]) {
+    const color = ROUTE_THEME_COLORS[normalize(value)];
+    if (color) return color;
+  }
+  return route?.color || fallback || '#2878c8';
+}
 const sourceData = (features) => ({ type: 'FeatureCollection', features });
 
 function vehicleBearing(vehicle) {
@@ -316,7 +331,7 @@ function updateVehicleMarker(record, vehicle) {
   const title = displayName(vehicle) || vehicle.id;
   record.element.title = title;
   record.element.setAttribute('aria-label', title);
-  record.element.style.setProperty('--route-color', route?.color || '#2878c8');
+  record.element.style.setProperty('--route-color', routeThemeColor(route));
   const bearing = vehicleBearing(vehicle);
   record.element.style.setProperty('--bearing', `${bearing}deg`);
   const rightBearing = (bearing + 90) * Math.PI / 180;
@@ -396,7 +411,7 @@ function showVehiclePopup(vehicle) {
 
   const content = document.createElement('article');
   content.className = 'vehicle-detail';
-  content.style.setProperty('--route-color', route?.color || vehicle.route_color || '#2878c8');
+  content.style.setProperty('--route-color', routeThemeColor(route, vehicle.route_color));
   content.addEventListener('click', (event) => event.stopPropagation());
 
   const head = document.createElement('div');

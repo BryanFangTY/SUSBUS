@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<widget id="cn.sustech.susbus" version="1.0.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+<widget id="cn.sustech.susbus" version="1.1.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
     <name>SUSBUS</name>
     <description>SUSBUS 校园巴士实时系统 —— 所有车辆实时位置地图</description>
     <author href="https://sustech.online">SUSBUS</author>

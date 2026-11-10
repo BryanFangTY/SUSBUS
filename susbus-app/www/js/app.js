@@ -128,7 +128,83 @@ function positionStopIndex(stops, position) {
   return sequenceIndex >= 0 ? sequenceIndex : stops.findIndex((stop) => stop.id === position?.next_stop_id);
 }
 
-// 车辆行驶方向：优先用当前位置在相邻站点间的投影，退回 heading，最后用全线投影
+// 点在直线上的全部投影候选（沿线局部极小值）：环线重复经过同一走廊时每次经过各有一个候选
+function lineOccurrences(coordinates, longitude, latitude) {
+  if (!Array.isArray(coordinates) || !Number.isFinite(longitude) || !Number.isFinite(latitude) || coordinates.length < 2) return [];
+  const scale = Math.cos(latitude * Math.PI / 180);
+  let routeProgress = 0;
+  const candidates = [];
+  for (let index = 1; index < coordinates.length; index++) {
+    const start = coordinates[index - 1], end = coordinates[index];
+    if (![start, end].every((point) => Number.isFinite(+point?.[0]) && Number.isFinite(+point?.[1]))) continue;
+    const dx = (+end[0] - +start[0]) * scale, dy = +end[1] - +start[1], length = dx ** 2 + dy ** 2;
+    if (!length) continue;
+    const fraction = Math.max(0, Math.min(1, (((longitude - +start[0]) * scale) * dx + (latitude - +start[1]) * dy) / length));
+    const segmentLength = haversineMeters(+start[1], +start[0], +end[1], +end[0]);
+    const distance = ((longitude - (+start[0] + (+end[0] - +start[0]) * fraction)) * scale) ** 2 +
+      (latitude - (+start[1] + (+end[1] - +start[1]) * fraction)) ** 2;
+    candidates.push({ progress: routeProgress + segmentLength * fraction, distance });
+    routeProgress += segmentLength;
+  }
+  const occurrences = [];
+  for (let index = 0; index < candidates.length; index++) {
+    const previous = candidates[index - 1], next = candidates[index + 1];
+    if ((previous && candidates[index].distance > previous.distance) ||
+        (next && candidates[index].distance > next.distance)) continue;
+    const last = occurrences.at(-1);
+    if (last && Math.abs(last.progress - candidates[index].progress) < 1) {
+      if (candidates[index].distance < last.distance) occurrences[occurrences.length - 1] = candidates[index];
+    } else occurrences.push(candidates[index]);
+  }
+  return occurrences;
+}
+
+// 站点在路线上的进展（米）：环线重复走廊仅取最近投影会落到错误的一次经过，
+// 这里取每站全部候选，用"进展单调不减 + 累计投影距离最小"动态规划消歧
+function stopProgressList(coordinates, stops) {
+  let states = [{ progress: -Infinity, cost: 0 }];
+  const layers = [];
+  for (const stop of stops) {
+    const occurrences = lineOccurrences(coordinates, +stop.longitude, +stop.latitude);
+    const current = [];
+    for (const occurrence of occurrences) {
+      let best = null;
+      for (const state of states) {
+        if (state.progress > occurrence.progress + 1) continue;
+        const cost = state.cost + occurrence.distance;
+        if (!best || cost < best.cost) best = { cost, progress: occurrence.progress, previous: state };
+      }
+      if (best) current.push(best);
+    }
+    // 无候选时原地踏步（保持 previous 链每层一环，回溯长度才与站点数一致）
+    states = current.length ? current : states.map((item) => ({ ...item, previous: item }));
+    layers.push(states);
+  }
+  let state = states.reduce((best, item) => (!best || item.cost < best.cost ? item : best), null);
+  const progress = [];
+  for (let index = layers.length - 1; index >= 0; index--) {
+    progress.unshift(state?.progress ?? 0);
+    state = state?.previous;
+  }
+  return progress.map((value, index) => (Number.isFinite(value) ? value : (progress[index - 1] ?? 0)));
+}
+
+// 路线上指定进展（米）处的路段走向（正北为 0，顺时针为正）
+function bearingAtProgress(coordinates, target) {
+  let routeProgress = 0;
+  for (let index = 1; index < coordinates.length; index++) {
+    const start = coordinates[index - 1], end = coordinates[index];
+    if (![start, end].every((point) => Number.isFinite(+point?.[0]) && Number.isFinite(+point?.[1]))) continue;
+    const segmentLength = haversineMeters(+start[1], +start[0], +end[1], +end[0]);
+    if (segmentLength && target <= routeProgress + segmentLength) {
+      return Math.atan2((+end[0] - +start[0]) * Math.cos(+start[1] * Math.PI / 180), +end[1] - +start[1]) * 180 / Math.PI;
+    }
+    routeProgress += segmentLength;
+  }
+  return null;
+}
+
+// 车辆行驶方向：优先用当前位置在相邻站点间的投影，退回"距下一站里程"估算，最后全线投影
 function vehicleBearingAt(coordinates, stops, vehicle) {
   const position = vehicle?.current_position;
   const fallback = () => lineBearingAt(coordinates, +vehicle?.longitude, +vehicle?.latitude);
@@ -137,16 +213,14 @@ function vehicleBearingAt(coordinates, stops, vehicle) {
   if (nextIndex < 0) return fallback();
   const leftIndex = position.type === 'between_stops' ? nextIndex - 1 : Math.min(nextIndex, stops.length - 2);
   if (leftIndex < 0) return fallback();
-  const total = coordinates.slice(1).reduce(
-    (sum, point, index) => sum + haversineMeters(+coordinates[index][1], +coordinates[index][0], +point[1], +point[0]), 0);
-  const progress = [];
-  for (const stop of stops) {
-    progress.push(lineProjection(coordinates, +stop.longitude, +stop.latitude, progress.at(-1) ?? 0, total)?.progress ?? progress.at(-1) ?? 0);
-  }
+  const progress = stopProgressList(coordinates, stops);
   const nearest = lineProjection(coordinates, +vehicle.longitude, +vehicle.latitude, progress[leftIndex], progress[leftIndex + 1]);
   if (nearest) return Math.atan2(nearest.dx, nearest.dy) * 180 / Math.PI;
-  const heading = Number(vehicle.heading);
-  return vehicle.heading != null && Number.isFinite(heading) ? heading : fallback();
+  // 窗口投影失败时按"距下一站里程"估算进展，取该处路段走向
+  //（巴士 heading 恒为 0，不能用作方向回退，否则箭头永远指向正北）
+  const distance = Number(position.distance_to_next_stop) || 0;
+  const estimate = Math.min(progress[nextIndex], Math.max(progress[leftIndex], progress[nextIndex] - distance));
+  return bearingAtProgress(coordinates, estimate) ?? fallback();
 }
 
 function vehicleLocationText(vehicle, route, stops = []) {
@@ -213,7 +287,7 @@ const NEUTRAL_ROUTE_COLOR = '#aaa';
 const NEUTRAL_STOP_COLOR = '#ccc';
 // 各线路主题色（1路/K1路/2路/K2路）：按线路 ID 与名称归一化匹配，未命中时退回接口配色
 const ROUTE_THEME_COLORS = {
-  line1: '#00A529', '1': '#00A529',
+  line1: '#42B44B', '1': '#42B44B',
   k1: '#006C41',
   line2: '#E96982', '2': '#E96982',
   k2: '#CB4543',
